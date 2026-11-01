@@ -7,9 +7,9 @@ cd "$(dirname "$0")/.." || exit 1
 fail=0
 run() { name="$1"; shift; if out=$("$@" 2>&1); then printf 'PASS  %s\n' "$name"; else printf 'FAIL  %s\n' "$name"; printf '%s\n' "$out" | tail -25 | sed 's/^/        /'; fail=1; fi; }
 tests/make_media.sh --ci || exit 1
-python3 -m pyflakes splice && echo "PASS  lint (pyflakes)"
-command -v shellcheck >/dev/null && shellcheck install.sh tests/*.sh bin/splice && echo "PASS  shellcheck"
-python3 -m py_compile splice/*.py tests/*.py && echo "PASS  compile"
+run "lint (pyflakes)"              python3 -m pyflakes splice
+if command -v shellcheck >/dev/null; then run "shellcheck" shellcheck install.sh tests/*.sh bin/splice; fi
+run "compile"                      python3 -m py_compile splice/*.py tests/*.py
 export SPLICE_ENCODER=cpu                 # CI runners have no GPU
 export SPLICE_NOAUDIO=1                   # no sound card in a container
 run "crop geometry"                python3 -I tests/test_cropdrag.py

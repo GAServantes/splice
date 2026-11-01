@@ -9,7 +9,7 @@ fail=0
 run() { name="$1"; shift; out=$("$@" 2>&1); rc=$?
   last=$(printf '%s\n' "$out" | grep -E "ALL PASS|PROBLEMS: 0|^OK|ERRORS: 0" | tail -1)
   if [ $rc -eq 0 ] && [ -n "$last" ]; then printf 'PASS  %-34s %s\n' "$name" "$last"; else printf 'FAIL  %-34s (exit %s)\n' "$name" "$rc"; printf '%s\n' "$out" | grep -E "FAIL|Error|Traceback|assert" | head -6 | sed 's/^/        /'; fail=1; fi; }
-# shellcheck disable=SC2317  # called through run()
+# shellcheck disable=SC2317,SC2329  # called through run()
 gtk() { GDK_BACKEND=x11 timeout "$1" xvfb-run -a -s "-screen 0 1280x800x24" python3 -I -u "${@:2}"; }
 python3 -m pyflakes splice && echo "PASS  lint"
 [ -d tests/media_qa ] || { echo "tests/media_qa missing: run tests/make_media.sh first"; exit 1; }
