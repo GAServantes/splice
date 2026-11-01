@@ -132,14 +132,10 @@ nothing opens a window on your desktop. GitHub Actions runs the same script on
 Ubuntu 24.04 and 26.04.
 
 ## Changelog
-
-**0.3.1.** Export uses the GPU (VAAPI H.264) by default with automatic CPU fallback. `Alt`+scroll zooms the timeline around the pointer (`Ctrl`+scroll still works).
-
-**0.3.0.** Drag-to-crop on the picture. Captions follow their clip when you reorder, trim or delete. Emoji, CJK and right-to-left captions, drawn identically in the preview and the saved video. App icon, installer, `.splice` file type, dock shortcut.
-
-**0.2.0.** Quality pass: fixed a crash on long or zoomed timelines, a memory and time blow-up when cutting many pieces from a long recording, rotated phone clips, frame-rate handling, files with no duration, the volume line at splits and trims, and more. Added cancel, safe saving, an unsaved-changes prompt, fast scrubbing and missing-file messages.
-
-**0.1.0.** First build.
+- **0.3.1**: Export uses the GPU (VAAPI H.264) by default with automatic CPU fallback. `Alt`+scroll zooms the timeline around the pointer (`Ctrl`+scroll still works).
+- **0.3.0**: Drag-to-crop on the picture. Captions follow their clip when you reorder, trim or delete. Emoji, CJK and right-to-left captions, drawn identically in the preview and the saved video. App icon, installer, `.splice` file type, dock shortcut.
+- **0.2.0**: Quality pass: fixed a crash on long or zoomed timelines, a memory and time blow-up when cutting many pieces from a long recording, rotated phone clips, frame-rate handling, files with no duration, the volume line at splits and trims, and more. Added cancel, safe saving, an unsaved-changes prompt, fast scrubbing and missing-file messages.
+- **0.1.0**: First build.
 
 ## License
 
