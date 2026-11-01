@@ -115,20 +115,21 @@ chooses a specific graphics card.
 Python with GTK 4 and libadwaita. The preview is a GStreamer pipeline drawn by
 the app; saving is one `ffmpeg` command built from your project; captions are
 drawn with Pango so the preview and the saved video match. The timeline is drawn
-with Cairo. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the details, the
-GPU measurements and the test suite.
+with Cairo.
 
 ## Tests
 
 ```bash
-tests/make_media.sh    # generates test videos with ffmpeg (about a minute, not committed)
-tests/run_all.sh quick # about 3 minutes, runs headless under Xvfb
+sh tests/install_ci_deps.sh   # Ubuntu packages the tests need (ffmpeg, Xvfb, ...)
+tests/run_ci.sh               # lint, then the headless tests; about 2 minutes
 ```
 
-The suite covers export correctness (cuts, joins, sync, volume, crop, 19
-awkward media files), real mouse and keyboard events, random-edit fuzzing,
-the GPU and its CPU fallback, and a one-hour timeline. Nothing opens a window on
-your desktop.
+The tests make small videos with ffmpeg (not committed) and cover export
+correctness (cuts, joins, sync, volume, crop, 19 awkward media files), captions
+in every script, the preview player, random-edit fuzzing through the real
+window, and saving and opening projects. It runs on the CPU under Xvfb, so
+nothing opens a window on your desktop. GitHub Actions runs the same script on
+Ubuntu 24.04 and 26.04.
 
 ## Changelog
 
