@@ -5,6 +5,7 @@
 A small video editor for the GNOME desktop on Ubuntu.</p>
 <p align="center">
 <a href="https://github.com/GAServantes/splice/actions/workflows/ci.yml"><img src="https://github.com/GAServantes/splice/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+<a href="https://github.com/GAServantes/splice/releases/latest"><img src="https://img.shields.io/github/v/release/GAServantes/splice" alt="Latest release"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue" alt="License: GPL-3.0-or-later"></a>
 </p>
 
