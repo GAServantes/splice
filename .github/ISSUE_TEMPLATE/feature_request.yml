@@ -1,0 +1,16 @@
+name: Feature request
+description: Suggest something Splice should do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What would you like?
+      description: "What you are trying to do. Splice is deliberately small (trim, join, text, sound, crop), so say what job it would help with."
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What do you do today?
+      description: Another app, a workaround, or doing it by hand.

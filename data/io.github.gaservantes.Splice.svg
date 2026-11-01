@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#46556f"/>
+      <stop offset="1" stop-color="#1c2533"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".18"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <clipPath id="sq"><rect x="8" y="8" width="112" height="112" rx="27"/></clipPath>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="27" fill="url(#bg)"/>
+  <rect x="8" y="8" width="112" height="56" fill="url(#shine)" clip-path="url(#sq)"/>
+  <!-- video lane: two clips -->
+  <rect x="21" y="30" width="50" height="23" rx="6" fill="#5b8def"/>
+  <rect x="75" y="30" width="32" height="23" rx="6" fill="#4a7bd9"/>
+  <!-- text lane -->
+  <rect x="33" y="58" width="44" height="13" rx="5" fill="#e8a73a"/>
+  <!-- sound lane with a waveform -->
+  <rect x="21" y="76" width="86" height="23" rx="6" fill="#2f8f6b"/>
+  <g stroke="#a9f0d1" stroke-width="3" stroke-linecap="round">
+    <line x1="30" y1="84" x2="30" y2="91"/><line x1="37" y1="80" x2="37" y2="95"/><line x1="44" y1="83" x2="44" y2="92"/>
+    <line x1="51" y1="79" x2="51" y2="96"/><line x1="58" y1="82" x2="58" y2="93"/>
+    <line x1="72" y1="81" x2="72" y2="94"/><line x1="79" y1="84" x2="79" y2="91"/><line x1="86" y1="80" x2="86" y2="95"/>
+    <line x1="93" y1="83" x2="93" y2="92"/><line x1="100" y1="85" x2="100" y2="90"/>
+  </g>
+  <!-- playhead -->
+  <rect x="62" y="22" width="4" height="84" rx="2" fill="#ef4444"/>
+  <path d="M53 22 H75 L64 35 Z" fill="#ef4444"/>
+</svg>

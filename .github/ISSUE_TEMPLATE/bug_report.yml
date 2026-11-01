@@ -1,0 +1,50 @@
+name: Bug report
+description: Something doesn't work the way it should
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Splice version
+      description: "Shown at the top of the changelog in the README, or `python3 -c 'import splice; print(splice.__version__)'` in the splice folder."
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Distribution and version
+      placeholder: Ubuntu 24.04
+    validations:
+      required: true
+  - type: input
+    id: desktop
+    attributes:
+      label: Desktop and session
+      description: "Your desktop and its version, and Wayland or X11 (`echo $XDG_SESSION_TYPE`)."
+      placeholder: GNOME 46, Wayland
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: Graphics card and driver
+      description: "Matters for saving videos, which uses the GPU when it can. The save message says (GPU) or (CPU)."
+      placeholder: Radeon RX 7800 XT, Mesa 25.2
+  - type: input
+    id: video
+    attributes:
+      label: About the video file
+      description: "Container, codec, resolution and frame rate if it is a problem with one file (`ffprobe file.mp4`)."
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output
+      description: "Start Splice from a terminal (`~/splice/bin/splice`), reproduce the problem, and paste what it prints."
+      render: text

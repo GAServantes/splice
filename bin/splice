@@ -1,0 +1,5 @@
+#!/bin/sh
+# Copyright (C) 2026 G. Austin Servantes
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Run Splice from this folder. Usage: splice [video files or a .splice project]
+cd "$(dirname "$(readlink -f "$0")")/.." && exec python3 -m splice "$@"

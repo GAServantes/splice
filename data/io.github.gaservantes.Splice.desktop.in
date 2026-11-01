@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Splice
+GenericName=Video Editor
+Comment=Light video editor: trim, join, add text, change sound, crop
+Exec=@EXEC@ %F
+Icon=io.github.gaservantes.Splice
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;GTK;
+Keywords=video;editor;trim;cut;join;crop;captions;subtitles;sound;
+MimeType=application/x-splice;video/mp4;video/x-matroska;video/webm;video/quicktime;video/x-msvideo;video/mpeg;
+StartupNotify=true
+StartupWMClass=io.github.gaservantes.Splice
