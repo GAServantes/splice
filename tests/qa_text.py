@@ -1,6 +1,6 @@
 # Copyright (C) 2026 G. Austin Servantes
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Captions: glyph coverage (emoji, CJK, Arabic), colour emoji, fit-to-width, timing, many captions, edge cases."""
+"""Captions: glyph coverage (emoji, CJK, Arabic), color emoji, fit-to-width, timing, many captions, edge cases."""
 import os, subprocess, sys, tempfile, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import cairo
@@ -26,7 +26,7 @@ for label, txt in (("emoji", "Party 🎉 🚀 ❤️ 👍🏽"), ("Japanese", "�
                    ("Arabic", "مرحبا بالعالم"), ("Hebrew", "שלום עולם"), ("Cyrillic/Greek", "Привет Γειά σου"), ("accents", "Ünïcödé àéîõü ñ ç"), ("symbols", "✓ ★ → ♥ © ™ € ½")):
     check(f"every character in {label} can be drawn", textfit.missing_glyphs(txt) == 0, f"({textfit.missing_glyphs(txt)} missing)")
 textfit.render_png(f"{work}/e.png", "🎉🚀❤️", 60, "#ffffff"); textfit.render_png(f"{work}/p.png", "Hello world", 60, "#ffffff")
-check("emoji are colour glyphs, not white boxes", colorful(f"{work}/e.png") > 2000 and colorful(f"{work}/e.png") > 4 * colorful(f"{work}/p.png"), f"colourful pixels: emoji={colorful(f'{work}/e.png')} plain={colorful(f'{work}/p.png')}")
+check("emoji are color glyphs, not white boxes", colorful(f"{work}/e.png") > 2000 and colorful(f"{work}/e.png") > 4 * colorful(f"{work}/p.png"), f"colorful pixels: emoji={colorful(f'{work}/e.png')} plain={colorful(f'{work}/p.png')}")
 
 # fit to width, including portrait
 W = 720
@@ -36,7 +36,7 @@ check("long caption shrinks to fit a portrait frame", bw <= W * 0.93 and px < 60
 check("short caption keeps its size", textfit.fit_px("Hi", 60, 1280) == 60)
 x, y = textfit.box_position("bottom", 1280, 720, 400, 80); check("bottom box sits above the bottom edge", 720 - (y + 80) > 30 and abs(x - 440) < 1)
 x, y = textfit.box_position("top", 1280, 720, 400, 80); check("top box sits below the top edge", 30 < y < 60)
-x, y = textfit.box_position("middle", 1280, 720, 400, 80); check("middle box is vertically centred", abs(y - 320) < 1)
+x, y = textfit.box_position("middle", 1280, 720, 400, 80); check("middle box is vertically centered", abs(y - 320) < 1)
 
 # export: emoji exported and visible, portrait caption inside the frame
 p = Project(); c = p.add_clip(f"{D}/portrait.mp4"); c.src_out = 2
@@ -44,7 +44,7 @@ p.texts = [Text("Party 🎉 日本語 مرحبا — and a very long portrait ca
 out = f"{work}/o.mp4"; export(p, out)
 subprocess.run(["ffmpeg", "-v", "error", "-y", "-nostdin", "-ss", "1.0", "-i", out, "-frames:v", "1", f"{work}/f.png"])
 subprocess.run(["ffmpeg", "-v", "error", "-y", "-nostdin", "-i", f"{work}/f.png", "-vf", "crop=720:150:0:1050", f"{work}/band.png"])
-check("export: colour emoji appear in the saved video", colorful(f"{work}/band.png") > 300, f"{colorful(f'{work}/band.png')} colourful px")
+check("export: color emoji appear in the saved video", colorful(f"{work}/band.png") > 300, f"{colorful(f'{work}/band.png')} colorful px")
 Wo, Ho = output_size(p)
 bw, bh = textfit.box_size(p.texts[0].text, textfit.fit_px(p.texts[0].text, Ho * 0.07, Wo))
 check("export: portrait caption stays inside the frame", bw <= Wo, f"box {bw:.0f} of {Wo}")

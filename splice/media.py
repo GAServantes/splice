@@ -1,7 +1,7 @@
 # Copyright (C) 2026 G. Austin Servantes
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Probe media files with ffprobe."""
-import json, subprocess
+"""Probe media files with ffprobe. Also: when every frame of a file starts (for frame-exact cuts and preview)."""
+import bisect, json, subprocess, threading
 from dataclasses import dataclass
 
 
@@ -86,3 +86,76 @@ def probe(path: str) -> MediaInfo:
     info = MediaInfo(path, w, h, dur, has_audio, fps or 30.0, rot)
     _cache[path] = info
     return info
+
+
+# --- frames --------------------------------------------------------------
+# Screen recordings have a variable frame rate: a still screen may hold one frame for half a second.
+# The frame on screen at time t is the last one that started at or before t (EPS absorbs timestamp rounding).
+EPS = 0.001
+_frames: dict[str, list[float]] = {}
+_frames_lock = threading.Lock()
+
+
+def frame_times(path: str) -> list[float]:
+    """Start time of every video frame, sorted, on the same clock as the preview and the export (0 = file start).
+    Reads packet headers only (about 0.4 s for 10 minutes of video). Cached; [] if it cannot be read."""
+    with _frames_lock:
+        if path in _frames:
+            return _frames[path]
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                              "packet=pts_time:format=start_time", "-of", "csv=p=1", "-i", path],
+                             capture_output=True, text=True, timeout=120).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        out = []
+    vals, start = [], 0.0
+    for line in out:                       # "packet,1.234" ... then "format,0.000" (the clock's zero)
+        kind, _, v = line.partition(",")
+        try:
+            v = float(v)
+        except ValueError:
+            continue
+        if kind == "packet":
+            vals.append(v)
+        elif kind == "format":
+            start = v
+    ts = sorted(v - start for v in vals)
+    with _frames_lock:
+        _frames[path] = ts
+    return ts
+
+
+def frames_ready(path: str) -> bool:
+    with _frames_lock:
+        return path in _frames
+
+
+def frame_start(path: str, t: float, wait: bool = True):
+    """Start time of the frame on screen at time t in the file, or None if unknown (or before the first frame)."""
+    if not wait and not frames_ready(path):
+        return None
+    ts = frame_times(path)
+    k = bisect.bisect_right(ts, t + EPS) - 1
+    return ts[k] if k >= 0 else None
+
+
+def grid_fps(path: str) -> float:
+    """The frame rate trims snap to (the export's rate for this file; 59.94 stays exact)."""
+    try:
+        n, _, d = fps_string(probe(path).fps).partition("/")
+        return float(n) / float(d or 1)
+    except Exception:
+        return 0.0
+
+
+def snap(path: str, t: float, lo: float = 0.0, hi: float = float("inf")) -> float:
+    """Round a time in the file to a whole frame, staying within [lo, hi] when a frame fits there."""
+    f = grid_fps(path)
+    if f <= 0:
+        return max(lo, min(t, hi))
+    k = round(max(lo, min(t, hi)) * f)
+    if k / f > hi + 1e-9:
+        k -= 1
+    if k / f < lo - 1e-9:
+        k += 1
+    return max(0.0, k / f)

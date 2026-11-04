@@ -29,6 +29,8 @@ head -c 5000 /dev/urandom > garbage.mp4
 $F -f lavfi -i "$V" -f lavfi -i "$A" $E -f matroska - > nodur.mkv
 $F -f lavfi -i "$V" -f lavfi -i "$A" -c:v libx264 -preset ultrafast -pix_fmt yuv420p10le -profile:v high10 -c:a aac tenbit.mp4
 $F -filter_complex "color=c=red:s=320x180:r=30:d=1[a];color=c=green:s=320x180:r=30:d=1[b];color=c=blue:s=320x180:r=30:d=1[c];color=c=yellow:s=320x180:r=30:d=1[d];[a][b][c][d]concat=n=4:v=1:a=0[v];aevalsrc='sin(2*PI*t*(200*pow(2,floor(t))))*0.5':s=48000:d=4[aud]" -map "[v]" -map "[aud]" -c:v libx264 -preset ultrafast -pix_fmt yuv420p -g 15 -c:a aac -b:a 192k tones.mp4
+$F -f lavfi -i "color=c=black:s=640x360:r=60:d=12" -f lavfi -i "sine=frequency=440:duration=12" -vf "geq=lum='16+6*mod(N*13\,32)':cb=128:cr=128,select='if(between(t\,4\,4.4)+between(t\,7\,7.3)\,0\,lt(random(0)\,0.55))'" -fps_mode vfr -c:v libx264 -preset ultrafast -g 240 -bf 2 -video_track_timescale 16000 -pix_fmt yuv420p -c:a aac -shortest frameid_vfr.mp4
+$F -f lavfi -i "color=c=black:s=640x360:r=30000/1001:d=8" -vf "geq=lum='16+6*mod(N*13\,32)':cb=128:cr=128" -c:v libx264 -preset ultrafast -g 300 -pix_fmt yuv420p frameid_2997.mp4
 cp base.mp4 "my video (1) #2 %20 'q' é日本.mp4"; cp base.mp4 -- "-dash.mp4"; cp base.mp4 "a:b.mp4"
 [ "$CI" = yes ] && { echo "media ready (CI subset)"; exit 0; }
 # detailed footage used by the GPU quality tests and the README screenshots

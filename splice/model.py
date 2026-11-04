@@ -5,7 +5,7 @@ import json, os
 from dataclasses import dataclass, field, asdict, fields
 from typing import Optional
 
-from .media import probe
+from .media import probe, snap
 
 
 @dataclass
@@ -19,6 +19,9 @@ class Clip:
     crop: Optional[list] = None
     # Volume line: [[seconds_into_clip, gain], ...]. Empty means flat `volume`.
     env: list = field(default_factory=list)
+    # False once the clip's sound has been unlinked: the picture plays silent, and the sound lives on as a
+    # separate Sound in Project.sounds that can be moved and trimmed on its own.
+    linked: bool = True
 
     @property
     def duration(self) -> float:
@@ -75,6 +78,18 @@ class Clip:
 
 
 @dataclass
+class Sound(Clip):
+    """Sound unlinked from its video: the same source range, volume line and fades as a clip, but placed at its
+    own timeline time (`start`) instead of under the picture. Unlinked sound never moves when clips are trimmed,
+    moved or deleted; anything past the end of the video is not in the saved video."""
+    start: float = 0.0
+
+    @property
+    def end(self) -> float:
+        return self.start + self.duration
+
+
+@dataclass
 class Text:
     text: str
     start: float
@@ -88,6 +103,7 @@ class Text:
 class Project:
     clips: list = field(default_factory=list)
     texts: list = field(default_factory=list)
+    sounds: list = field(default_factory=list)
 
     @property
     def duration(self) -> float:
@@ -161,10 +177,11 @@ class Project:
         amap = self._anchor_map()
         c = self.clips[i]
         old_in = c.src_in
-        if new_in is not None:
-            c.set_in(new_in)
+        if new_in is not None:                     # cuts land on whole frames
+            c.set_in(snap(c.path, new_in, 0.0, c.src_out - 0.1))
         if new_out is not None:
-            c.set_out(new_out, full)
+            end = full or float("inf")
+            c.set_out(end if new_out >= end else snap(c.path, new_out, c.src_in + 0.1, end), full)
         shift, new_dur = c.src_in - old_in, c.duration
         keep, removed = [], 0
         for t, a in zip(self.texts, amap):
@@ -196,6 +213,7 @@ class Project:
             return False
         i, off = self.clip_at(t)
         c = self.clips[i]
+        off = snap(c.path, c.src_in + off) - c.src_in      # split between two frames
         if off < 0.1 or c.duration - off < 0.1:
             return False
         env = sorted(c.env)
@@ -203,11 +221,72 @@ class Project:
         left_env = [[x, y] for x, y in env if x < off - 1e-6] + [[off, g]] if env else []
         right_env = [[0.0, g]] + [[x - off, y] for x, y in env if x > off + 1e-6] if env else []
         right = Clip(c.path, c.src_in + off, c.src_out, c.volume, 0.0, c.fade_out,
-                     list(c.crop) if c.crop else None, right_env)
+                     list(c.crop) if c.crop else None, right_env, c.linked)
         c.src_out = c.src_in + off
         c.fade_out = 0.0
         c.env = left_env
         self.clips.insert(i + 1, right)
+        return True
+
+    # --- unlinked sound --------------------------------------------------------------------------------
+    def unlink(self, i: int) -> int:
+        """Split clip i's sound off into a Sound at the same place, with the same volume line and fades.
+        The clip plays silent from now on. Returns the new Sound's index."""
+        c = self.clips[i]
+        s = Sound(c.path, c.src_in, c.src_out, c.volume, c.fade_in, c.fade_out, None,
+                  [list(q) for q in c.env], start=self.clip_start(i))
+        c.linked = False
+        self.sounds.append(s)
+        return len(self.sounds) - 1
+
+    def relink(self, i: int) -> int:
+        """Give clip i its own sound back, in sync, and remove the unlinked sound that came from its part of
+        the file (it would play twice otherwise). Returns how many unlinked sounds were removed."""
+        c = self.clips[i]
+        keep = [s for s in self.sounds
+                if not (s.path == c.path and s.src_in < c.src_out - 1e-6 and s.src_out > c.src_in + 1e-6)]
+        removed = len(self.sounds) - len(keep)
+        self.sounds[:] = keep
+        c.linked = True
+        return removed
+
+    def unlinked_from(self, i: int) -> list:
+        """Indexes of the unlinked sounds that came from clip i's part of its file."""
+        c = self.clips[i]
+        return [j for j, s in enumerate(self.sounds)
+                if s.path == c.path and s.src_in < c.src_out - 1e-6 and s.src_out > c.src_in + 1e-6]
+
+    def move_sound(self, j: int, start: float):
+        self.sounds[j].start = max(0.0, start)
+
+    def trim_sound(self, j: int, new_in: Optional[float] = None, new_out: Optional[float] = None,
+                   full: Optional[float] = None):
+        """Trim an unlinked sound. The sound itself stays where it is on the timeline: trimming the left edge
+        moves the start with it (and never before the timeline's start)."""
+        s = self.sounds[j]
+        if new_in is not None:
+            old = s.src_in
+            s.set_in(max(new_in, old - s.start))
+            s.start = max(0.0, s.start + s.src_in - old)
+        if new_out is not None:
+            s.set_out(new_out, full)
+
+    def split_sound(self, j: int, t: float) -> bool:
+        """Split unlinked sound j at timeline time t into two. False if t is too close to an edge."""
+        s = self.sounds[j]
+        off = t - s.start
+        if off < 0.1 or s.duration - off < 0.1:
+            return False
+        env = sorted(s.env)
+        g = s.line_at(off)
+        left_env = [[x, y] for x, y in env if x < off - 1e-6] + [[off, g]] if env else []
+        right_env = [[0.0, g]] + [[x - off, y] for x, y in env if x > off + 1e-6] if env else []
+        right = Sound(s.path, s.src_in + off, s.src_out, s.volume, 0.0, s.fade_out, None, right_env,
+                      start=s.start + off)
+        s.src_out = s.src_in + off
+        s.fade_out = 0.0
+        s.env = left_env
+        self.sounds.insert(j + 1, right)
         return True
 
     def save(self, path: str):
@@ -215,7 +294,8 @@ class Project:
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             json.dump({"version": 1, "clips": [asdict(c) for c in self.clips],
-                       "texts": [asdict(t) for t in self.texts]}, f, indent=1)
+                       "texts": [asdict(t) for t in self.texts],
+                       "sounds": [asdict(s) for s in self.sounds]}, f, indent=1)
         os.replace(tmp, path)
 
     @staticmethod
@@ -223,9 +303,11 @@ class Project:
         """Tolerant of newer files: unknown fields are ignored, missing ones take defaults."""
         with open(path) as f:
             d = json.load(f)
-        ck, tk = {f.name for f in fields(Clip)}, {f.name for f in fields(Text)}
+        ck, tk, sk = ({f.name for f in fields(Clip)}, {f.name for f in fields(Text)},
+                      {f.name for f in fields(Sound)})
         clips = [Clip(**{k: v for k, v in c.items() if k in ck}) for c in d["clips"]]
         texts = [Text(**{k: v for k, v in t.items() if k in tk}) for t in d["texts"]]
-        for c in clips:
+        sounds = [Sound(**{k: v for k, v in s.items() if k in sk}) for s in d.get("sounds", [])]
+        for c in clips + sounds:
             c.env = sorted([list(p) for p in c.env])
-        return Project(clips, texts)
+        return Project(clips, texts, sounds)

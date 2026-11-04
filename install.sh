@@ -15,7 +15,7 @@ MIME="$HOME/.local/share/mime/packages"
 DOCK=yes; REMOVE=no
 for a in "$@"; do case "$a" in --no-dock) DOCK=no;; --uninstall) REMOVE=yes;; esac; done
 
-dock() {  # dock add|remove : edit GNOME's favourite apps (the dock) without touching other entries
+dock() {  # dock add|remove : edit GNOME's favorite apps (the dock) without touching other entries
   command -v gsettings >/dev/null 2>&1 || { echo "gsettings not found: skipped the dock"; return 0; }
   python3 - "$1" "$ID.desktop" <<'PY'
 import ast, subprocess, sys

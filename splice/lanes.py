@@ -8,7 +8,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Gdk, GLib, Adw
 
-from . import peaks, textfit
+from . import export, peaks, textfit
 
 RULER_H, V_H, T_H, S_H, GAP, PAD, HANDLE = 24, 54, 30, 54, 4, 10, 7
 V_Y = RULER_H + GAP
@@ -23,6 +23,19 @@ LIGHT = dict(bg=(.98, .98, .985), line=(.83, .85, .88), mute=(.40, .44, .52), in
 DARK = dict(bg=(.125, .145, .175), line=(.25, .29, .34), mute=(.60, .65, .72), ink=(.90, .92, .95),
             vid=(.33, .52, .91), txt=(.91, .65, .23), snd=(.25, .69, .52), ph=(.96, .36, .36), acc=(.42, .62, 1.0))
 STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600]
+
+
+def edge_preview_offset(p, i, side):
+    """Time into clip i of the frame its edge keeps: the first frame for the left edge, the last exported
+    frame for the right edge. Trimming shows exactly this frame, so what you see is where the cut lands."""
+    if side == "l":
+        return 0.0
+    c = p.clips[i]
+    try:
+        f = export._fps_value(export.output_fps(p))
+    except Exception:
+        return max(0.0, c.duration - 0.04)
+    return max(0.0, (export._frames(c.duration, f) - 1) / f)
 
 
 def palette():
@@ -121,7 +134,7 @@ class Lanes(Gtk.DrawingArea):
 
     def refresh(self):
         self._sync_adj()
-        for c in self.p.clips:
+        for c in self.p.clips + self.p.sounds:
             self._want_peaks(c.path)
         self.queue_draw()
 
@@ -202,6 +215,11 @@ class Lanes(Gtk.DrawingArea):
                     return ("t", j, "l" if x - x0 < HANDLE else "r" if x1 - x < HANDLE else "body")
             return ("empty",)
         if S_Y <= y <= S_Y + S_H:
+            for j in reversed(range(len(self.p.sounds))):        # unlinked sound sits on top
+                snd = self.p.sounds[j]
+                x0, x1 = self.x_of(snd.start), self.x_of(snd.end)
+                if x0 <= x <= x1:
+                    return ("a", j, "l" if x - x0 < HANDLE else "r" if x1 - x < HANDLE else "body")
             i = self._clip_at(x)
             return ("s", i, "body") if i is not None else ("empty",)
         return ("empty",)
@@ -212,9 +230,15 @@ class Lanes(Gtk.DrawingArea):
     def _y_gain(self, y):
         return max(0.0, min(GAIN_MAX, (S_Y + S_H - 4 - y) / (S_H - 8) * GAIN_MAX))
 
-    def _near_point(self, i, x, y):
-        c = self.p.clips[i]
-        s = self.p.clip_start(i)
+    def _owner(self, kind, i):
+        """(clip or unlinked sound, its timeline start) for a sound hit."""
+        if kind == "a":
+            snd = self.p.sounds[i]
+            return snd, snd.start
+        return self.p.clips[i], self.p.clip_start(i)
+
+    def _near_point(self, i, x, y, kind="s"):
+        c, s = self._owner(kind, i)
         for k, (t, g) in enumerate(c.env):
             if abs(self.x_of(s + t) - x) <= 8 and abs(self._gain_y(g) - y) <= 8:
                 return k
@@ -238,18 +262,29 @@ class Lanes(Gtk.DrawingArea):
                      mode={"l": "trim_l", "r": "trim_r", "body": "move"}[part])
             if part == "body":
                 app.seek(self.t_of(x))
+            else:                                       # decode the frames around this edge for instant feedback
+                app.player.prefetch(d["start"] + edge_preview_offset(self.p, i, part))
         elif h[0] == "t":
             j, part = h[1], h[2]
             t = self.p.texts[j]
             app.select(("t", j))
             d.update(orig=(t.start, t.end), mode={"l": "t_l", "r": "t_r", "body": "t_move"}[part])
             app.seek(max(t.start, min(self.t_of(x), t.end - 0.01)))
-        elif h[0] == "s":
-            i = h[1]
-            c = self.p.clips[i]
-            app.select(("s", i))
-            k = self._near_point(i, x, y)
-            s = self.p.clip_start(i)
+        elif h[0] == "s" and not self.p.clips[h[1]].linked:
+            d["mode"] = "scrub"                          # its sound is unlinked: nothing to edit here
+            app.select(("s", h[1]))
+            app.seek(self.t_of(x))
+        elif h[0] in ("s", "a"):
+            kind, i = h[0], h[1]
+            c, s = self._owner(kind, i)
+            app.select((kind, i))
+            k = self._near_point(i, x, y, kind)
+            if k is None and kind == "a" and h[2] in ("l", "r"):          # trim an unlinked sound
+                from .media import probe
+                d.update(mode="a_" + h[2], orig=(c.src_in, c.src_out, c.start), orig_env=[list(q) for q in c.env],
+                         full=probe(c.path).duration)
+                self.queue_draw()
+                return
             if k is None:
                 tl = self.t_of(x) - s
                 if abs(self._gain_y(c.line_at(tl)) - y) <= 10:       # grabbed the line: add a point
@@ -259,10 +294,13 @@ class Lanes(Gtk.DrawingArea):
                     c.env.append([tl, c.line_at(tl)])
                     c.env.sort()
                     k = min(range(len(c.env)), key=lambda q: abs(c.env[q][0] - tl))
+                elif kind == "a":                                    # drag the unlinked sound along
+                    d.update(mode="a_move", orig=c.start)
+                    app.seek(self.t_of(x))
                 else:
                     app.seek(self.t_of(x))
             if k is not None:
-                d.update(mode="point", k=k, start=s)
+                d.update(mode="point", k=k, start=s, kind=kind)
         self.queue_draw()
 
     def _cp(self):
@@ -292,8 +330,8 @@ class Lanes(Gtk.DrawingArea):
                 d["removed"] = self.p.trim(d["h"][1], new_in=d["orig"][0] + dt)
             else:
                 d["removed"] = self.p.trim(d["h"][1], new_out=d["orig"][1] + dt, full=full)
-            # show the frame at the edge being moved
-            self.app.seek_scrub(d["start"] + (0.0 if m == "trim_l" else max(0.0, c.duration - 0.04)))
+            # show the frame the moved edge keeps (exact, so releasing the mouse never changes it)
+            self.app.seek_scrub(d["start"] + edge_preview_offset(self.p, d["h"][1], "l" if m == "trim_l" else "r"))
         elif m in ("t_l", "t_r", "t_move"):
             if abs(dx) < 2 and not d["cp"]:
                 return
@@ -308,9 +346,27 @@ class Lanes(Gtk.DrawingArea):
             else:
                 t.end = max(s0 + 0.3, e0 + dt)
             self.app.refresh_pop()
+        elif m == "a_move":
+            if abs(dx) < 2 and not d["cp"]:
+                return
+            self._cp()
+            j = d["h"][1]
+            self.p.move_sound(j, self._snap_start(j, d["orig"] + dt))
+        elif m in ("a_l", "a_r"):
+            if abs(dx) < 2 and not d["cp"]:
+                return
+            self._cp()
+            j = d["h"][1]
+            snd = self.p.sounds[j]
+            snd.src_in, snd.src_out, snd.start = d["orig"]
+            snd.env = [list(q) for q in d["orig_env"]]
+            if m == "a_l":
+                self.p.trim_sound(j, new_in=d["orig"][0] + dt)
+            else:
+                self.p.trim_sound(j, new_out=d["orig"][1] + dt, full=d["full"])
         elif m == "point":
             self._cp()
-            c = self.p.clips[d["h"][1]]
+            c, _ = self._owner(d.get("kind", "s"), d["h"][1])
             k = d["k"]
             lo = c.env[k - 1][0] if k > 0 else 0.0
             hi = c.env[k + 1][0] if k < len(c.env) - 1 else c.duration
@@ -323,6 +379,8 @@ class Lanes(Gtk.DrawingArea):
         if not d or not d["mode"]:
             return
         m = d["mode"]
+        if m in ("trim_l", "trim_r"):
+            self.app.player.end_prefetch()
         if m == "move" and abs(dx) > 4:
             i = d["h"][1]
             mid = d["start"] * self.pps + d["dur"] * self.pps / 2 + dx
@@ -339,13 +397,27 @@ class Lanes(Gtk.DrawingArea):
             self.app.removed_toast(d["removed"])
         elif m in ("t_l", "t_r", "t_move", "point") and d["cp"]:
             self.app.changed(player=False)
+        elif m in ("a_move", "a_l", "a_r") and d["cp"]:
+            self.app.changed(player=False)
         self.queue_draw()
+
+    def _snap_start(self, j, start):
+        """A dragged unlinked sound clicks onto clip edges, the playhead and the timeline start (within 8 px),
+        by either of its ends."""
+        snd = self.p.sounds[j]
+        marks = [0.0, self.app.t] + [self.p.clip_start(i) for i in range(len(self.p.clips) + 1)]
+        best, dist = start, 8.0 / self.pps
+        for m in marks:
+            for cand in (m, m - snd.duration):
+                if abs(cand - start) < dist and cand >= 0:
+                    best, dist = cand, abs(cand - start)
+        return best
 
     def _right(self, g, n, x, y):
         h = self.hit(x, y)
-        if h[0] == "s":
-            k = self._near_point(h[1], x, y)
-            c = self.p.clips[h[1]]
+        if h[0] in ("s", "a"):
+            k = self._near_point(h[1], x, y, h[0])
+            c, _ = self._owner(h[0], h[1])
             if k is not None and len(c.env) > 1:
                 self.app.checkpoint()
                 c.env.pop(k)
@@ -416,56 +488,37 @@ class Lanes(Gtk.DrawingArea):
                 rr(cr, x0 + off + 1, V_Y + 8, 4, V_H - 16, 2)
                 rr(cr, x0 + off + bw - 5, V_Y + 8, 4, V_H - 16, 2)
                 cr.fill()
-            # sound block
-            cr.save()
-            rr(cr, x0, S_Y, bw, S_H)
-            cr.set_source_rgba(*p["snd"], .20)
-            cr.fill_preserve()
-            cr.set_source_rgba(*p["snd"], .75 if sel != ("s", i) else 1)
-            cr.set_line_width(2.5 if sel == ("s", i) else 1)
-            cr.stroke_preserve()
-            cr.clip()
-            pk = self.peaks.get(c.path)
-            if pk:
-                cr.set_source_rgba(*p["snd"], .9)
-                cr.set_line_width(1.2)
-                mid = S_Y + S_H / 2
-                px = max(x0, vx0)
-                px = x0 + int((px - x0) // 2) * 2
-                while px < min(x0 + bw, vx1):
-                    k = int((c.src_in + (px - x0) / self.pps) * peaks.PEAK_RATE)
-                    k2 = max(k + 1, int((c.src_in + (px - x0 + 2) / self.pps) * peaks.PEAK_RATE))
-                    a = max(pk[k:k2] or [0.0]) * (S_H / 2 - 5)
-                    cr.move_to(px + .5, mid - a)
-                    cr.line_to(px + .5, mid + a)
-                    px += 2
+            if not c.linked:                              # its sound is unlinked: an empty dashed outline
+                cr.save()
+                rr(cr, x0 + .5, S_Y + .5, bw - 1, S_H - 1)
+                cr.set_source_rgba(*p["mute"], .9 if sel == ("s", i) else .45)
+                cr.set_line_width(1.5 if sel == ("s", i) else 1)
+                cr.set_dash([4, 4])
                 cr.stroke()
-            cr.set_source_rgb(*p["ink"])
-            cr.set_line_width(1.8)
-            pts = [[0.0, c.line_at(0)]] + sorted(c.env) + [[c.duration, c.line_at(c.duration)]] if c.env \
-                else [[0.0, c.volume], [c.duration, c.volume]]
-            for q, (tt, g) in enumerate(pts):
-                (cr.move_to if q == 0 else cr.line_to)(self.x_of(s + tt), self._gain_y(g))
-            cr.stroke()
-            if sel == ("s", i):
-                for tt, g in c.env:
-                    cr.arc(self.x_of(s + tt), self._gain_y(g), 4, 0, 6.2832)
-                    cr.set_source_rgb(1, 1, 1)
-                    cr.fill_preserve()
-                    cr.set_source_rgb(*p["ink"])
-                    cr.set_line_width(1.5)
-                    cr.stroke()
-            cr.restore()
-            if c.fade_in > 0 or c.fade_out > 0:       # small fade ramps
-                cr.set_source_rgba(*p["ink"], .55)
-                cr.set_line_width(1)
-                if c.fade_in > 0:
-                    cr.move_to(x0, S_Y + S_H - 2)
-                    cr.line_to(x0 + c.fade_in * self.pps, S_Y + 3)
-                if c.fade_out > 0:
-                    cr.move_to(x1 - 2, S_Y + S_H - 2)
-                    cr.line_to(x1 - 2 - c.fade_out * self.pps, S_Y + 3)
-                cr.stroke()
+                cr.restore()
+                if bw > 20:                                # mark the picture as silent
+                    cr.set_source_rgba(1, 1, 1, .85)
+                    cr.save()
+                    cr.rectangle(x0 + off + 9, V_Y, max(0, bw - 18), V_H)
+                    cr.clip()
+                    textfit.ui_text(cr, "sound unlinked", x0 + off + 11, V_Y + V_H - 9, 10)
+                    cr.restore()
+                continue
+            self._sound_block(cr, p, c, x0, bw, s, sel == ("s", i), vx0, vx1)
+        # unlinked sound, on top of the clips' sound
+        end_x = self.x_of(proj.duration)
+        for j, snd in enumerate(proj.sounds):
+            x0, x1 = self.x_of(snd.start), self.x_of(snd.end)
+            if x1 < vx0 or x0 > vx1:
+                continue
+            bw = max(2.0, x1 - x0 - 2)
+            self._sound_block(cr, p, snd, x0, bw, snd.start, sel == ("a", j), vx0, vx1, loose=True)
+            if x1 > end_x and proj.clips:                  # past the end of the video: not in the saved video
+                cr.save()
+                cr.rectangle(max(end_x, x0), S_Y, x1 - max(end_x, x0), S_H)
+                cr.set_source_rgba(*p["bg"], .65)
+                cr.fill()
+                cr.restore()
         # text pills
         for j, t in enumerate(proj.texts):
             x0, x1 = self.x_of(t.start), self.x_of(t.end)
@@ -483,6 +536,65 @@ class Lanes(Gtk.DrawingArea):
             cr.set_source_rgb(.16, .11, 0)
             textfit.ui_text(cr, t.text, x0 + 8, T_Y + T_H / 2 + 4, 11, True)
             cr.restore()
+
+    def _sound_block(self, cr, p, c, x0, bw, s, selected, vx0, vx1, loose=False):
+        """One block in the Sound row: waveform, volume line (with its points when selected) and fade ramps.
+        loose: an unlinked sound (stronger fill and outline, trim handles)."""
+        x1 = x0 + bw + 2
+        cr.save()
+        rr(cr, x0, S_Y, bw, S_H)
+        cr.set_source_rgba(*p["snd"], .38 if loose else .20)
+        cr.fill_preserve()
+        cr.set_source_rgba(*(p["acc"] if loose and selected else p["snd"]), .75 if not selected else 1)
+        cr.set_line_width(2.5 if selected else 1.5 if loose else 1)
+        cr.stroke_preserve()
+        cr.clip()
+        pk = self.peaks.get(c.path)
+        if pk:
+            cr.set_source_rgba(*p["snd"], .9)
+            cr.set_line_width(1.2)
+            mid = S_Y + S_H / 2
+            px = max(x0, vx0)
+            px = x0 + int((px - x0) // 2) * 2
+            while px < min(x0 + bw, vx1):
+                k = int((c.src_in + (px - x0) / self.pps) * peaks.PEAK_RATE)
+                k2 = max(k + 1, int((c.src_in + (px - x0 + 2) / self.pps) * peaks.PEAK_RATE))
+                a = max(pk[k:k2] or [0.0]) * (S_H / 2 - 5)
+                cr.move_to(px + .5, mid - a)
+                cr.line_to(px + .5, mid + a)
+                px += 2
+            cr.stroke()
+        cr.set_source_rgb(*p["ink"])
+        cr.set_line_width(1.8)
+        pts = [[0.0, c.line_at(0)]] + sorted(c.env) + [[c.duration, c.line_at(c.duration)]] if c.env \
+            else [[0.0, c.volume], [c.duration, c.volume]]
+        for q, (tt, g) in enumerate(pts):
+            (cr.move_to if q == 0 else cr.line_to)(self.x_of(s + tt), self._gain_y(g))
+        cr.stroke()
+        if selected:
+            for tt, g in c.env:
+                cr.arc(self.x_of(s + tt), self._gain_y(g), 4, 0, 6.2832)
+                cr.set_source_rgb(1, 1, 1)
+                cr.fill_preserve()
+                cr.set_source_rgb(*p["ink"])
+                cr.set_line_width(1.5)
+                cr.stroke()
+        cr.restore()
+        if loose and bw > 20:                              # trim handles, like a clip's
+            cr.set_source_rgba(*p["ink"], .45)
+            rr(cr, x0 + 1, S_Y + 8, 4, S_H - 16, 2)
+            rr(cr, x0 + bw - 5, S_Y + 8, 4, S_H - 16, 2)
+            cr.fill()
+        if c.fade_in > 0 or c.fade_out > 0:                # small fade ramps
+            cr.set_source_rgba(*p["ink"], .55)
+            cr.set_line_width(1)
+            if c.fade_in > 0:
+                cr.move_to(x0, S_Y + S_H - 2)
+                cr.line_to(x0 + c.fade_in * self.pps, S_Y + 3)
+            if c.fade_out > 0:
+                cr.move_to(x1 - 2, S_Y + S_H - 2)
+                cr.line_to(x1 - 2 - c.fade_out * self.pps, S_Y + 3)
+            cr.stroke()
 
 
 class Playhead(Gtk.DrawingArea):

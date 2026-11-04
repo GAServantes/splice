@@ -34,9 +34,15 @@ def invariants(w):
             assert 0 <= x <= 1 and 0 <= y <= 1 and 0.04 < cw <= 1 and 0.04 < ch <= 1 and x + cw <= 1.0001 and y + ch <= 1.0001, f"clip {i} crop {c.crop}"
     for j, t in enumerate(P.texts):
         assert t.end > t.start and t.start >= -1e-6, f"text {j} {t.start}-{t.end}"
+    for j, s in enumerate(P.sounds):
+        full = probe(s.path).duration
+        assert s.start >= -1e-6 and s.src_in >= -1e-6 and s.duration >= 0.09, f"sound {j} {s.start} {s.src_in}-{s.src_out}"
+        assert s.src_out <= full + 0.02, f"sound {j} src_out {s.src_out} > media {full}"
+        ts = [t for t, _ in s.env]
+        assert ts == sorted(ts) and all(-1e-6 <= t <= s.duration + 1e-3 for t in ts), f"sound {j} env {s.env}"
     if w.sel:
         k, i = w.sel
-        assert i < (len(P.texts) if k == "t" else len(P.clips)), f"dangling selection {w.sel}"
+        assert i < w._count(k), f"dangling selection {w.sel}"
     assert abs(P.duration - sum(c.duration for c in P.clips)) < 1e-6
     assert -1e-6 <= w.t <= P.duration + 1e-3, f"playhead {w.t} outside 0..{P.duration}"
 
@@ -81,6 +87,23 @@ def op_crop(w):
     elif R.random() < .5: w._crop_remove(P.clips[i])
     else: w._crop_all(P.clips[i])
     if R.random() < .5: w._crop_done()
+def op_unlink(w):
+    P = w.project
+    if P.clips:
+        w.seek(R.uniform(0, P.duration)); w.select(R.choice([None, ("v", P.clip_at(w.t)[0])])); w.tool_unlink()
+def op_sound(w):
+    P = w.project
+    if not P.sounds: return
+    j = R.randrange(len(P.sounds)); s = P.sounds[j]; full = probe(s.path).duration
+    w.select(("a", j)); r = R.random()
+    if r < .2: w.delete_selected(); return
+    w.checkpoint()
+    if r < .45: P.move_sound(j, R.uniform(-2, P.duration + 3))
+    elif r < .6: P.trim_sound(j, new_in=R.uniform(-1, full))
+    elif r < .75: P.trim_sound(j, new_out=R.uniform(0, full * 1.2), full=full)
+    elif r < .85: s.volume, s.fade_in, s.fade_out = R.uniform(0, 2), R.uniform(0, 2), R.uniform(0, 2)
+    else: w.seek(R.uniform(s.start, s.end)); w.tool_split(); return
+    w.changed()
 def op_undo(w):  w.do_undo()
 def op_redo(w):  w.do_redo()
 def op_seek(w):  w.seek(R.uniform(0, max(0.01, w.project.duration)))
@@ -88,7 +111,8 @@ def op_play(w):
     if w.project.clips: w.player.toggle()
 def op_select(w):
     P = w.project
-    pick = R.choice([None, ("v", R.randrange(len(P.clips))) if P.clips else None, ("t", R.randrange(len(P.texts))) if P.texts else None, ("s", R.randrange(len(P.clips))) if P.clips else None])
+    pick = R.choice([None, ("v", R.randrange(len(P.clips))) if P.clips else None, ("t", R.randrange(len(P.texts))) if P.texts else None, ("s", R.randrange(len(P.clips))) if P.clips else None,
+                     ("a", R.randrange(len(P.sounds))) if P.sounds else None])
     w.select(pick)
 def op_text_edit(w):
     P = w.project
@@ -101,7 +125,8 @@ def op_saveload(w):
     after = json.dumps(w.project.__dict__, default=lambda o: o.__dict__, sort_keys=True)
     assert before == after, "save/load round trip differs"
 OPS = [op_add] * 4 + [op_split] * 5 + [op_text] * 3 + [op_del] * 3 + [op_trim] * 4 + [op_move] * 2 + [op_vol] * 4 + [op_crop] * 3 + \
-      [op_undo] * 3 + [op_redo] * 2 + [op_seek] * 3 + [op_play] * 2 + [op_select] * 2 + [op_text_edit] * 3 + [op_saveload]
+      [op_undo] * 3 + [op_redo] * 2 + [op_seek] * 3 + [op_play] * 2 + [op_select] * 2 + [op_text_edit] * 3 + [op_saveload] + \
+      [op_unlink] * 3 + [op_sound] * 4
 
 class T(A.SpliceApp):
     def do_activate(self):
@@ -119,7 +144,8 @@ class T(A.SpliceApp):
         def finish():
             w.player.pause()
             P = w.project
-            print(f"seed {seed}: {NOPS} ops, final {len(P.clips)} clips, {len(P.texts)} texts, {P.duration:.1f}s, undo depth {len(w.undo)}")
+            print(f"seed {seed}: {NOPS} ops, final {len(P.clips)} clips, {len(P.texts)} texts, {len(P.sounds)} unlinked sounds "
+                  f"({sum(not c.linked for c in P.clips)} clips unlinked), {P.duration:.1f}s, undo depth {len(w.undo)}")
             if P.clips:
                 out = os.path.join(tempfile.mkdtemp(), "fuzz.mp4")
                 try:

@@ -4,7 +4,7 @@
 import atexit, os, subprocess, tempfile, shutil, threading
 from typing import Callable, Optional
 
-from .media import probe, fps_string
+from .media import probe, fps_string, frame_start, EPS
 from .model import Project
 from . import textfit
 
@@ -51,7 +51,7 @@ def gpu_device() -> Optional[str]:
 FORMATS = {".mp4": "mp4", ".mov": "mov", ".mkv": "matroska"}
 
 
-class ExportCancelled(Exception):
+class ExportCanceled(Exception):
     pass
 
 
@@ -94,6 +94,17 @@ def _gain_expr(c) -> str:
         seg = f"({g0:.4f}+({g1 - g0:.4f})*(t-{t0:.4f})/{t1 - t0:.4f})"
         expr = f"if(lt(t\\,{t1:.4f})\\,{seg}\\,{expr})"
     return expr
+
+
+def _fades(c) -> str:
+    """afade filters for a clip's (or unlinked sound's) fade in and out, starting with a comma; "" for none."""
+    out = ""
+    if c.fade_in > 0:
+        out += f",afade=t=in:st=0:d={min(c.fade_in, c.duration):.3f}"
+    if c.fade_out > 0:
+        fo = min(c.fade_out, c.duration)
+        out += f",afade=t=out:st={max(0, c.duration - fo):.3f}:d={fo:.3f}"
+    return out
 
 
 def crop_rect(c, info) -> tuple[int, int, int, int]:
@@ -167,7 +178,12 @@ def build(p: Project, out: str, workdir: str, crf: int = 20, fmt: str = "mp4", g
         # Seek on the input: only the needed part is decoded (fast and light on memory for long recordings).
         # Decoding stays on the CPU: GPU decode would have to copy every frame back for the CPU filters (slower).
         cmd += ["-threads", "1" if len(p.clips) > 4 else "0"]
-        cmd += ["-ss", f"{c.src_in:.4f}", "-t", f"{seg:.4f}", "-i", c.path]
+        # Start the read at the frame that is on screen at the in-point (a still screen may have started it
+        # well before), so the clip opens on the frame the preview showed and the picture stays in sync.
+        held = frame_start(c.path, c.src_in)
+        start = max(0.0, min(c.src_in, (held if held is not None else c.src_in - 1.0) - 0.0005))
+        look = c.src_in - start
+        cmd += ["-ss", f"{start:.6f}", "-t", f"{look + seg + 0.25:.6f}", "-i", c.path]
         vi = n_in
         n_in += 1
         crop = ""
@@ -175,26 +191,40 @@ def build(p: Project, out: str, workdir: str, crf: int = 20, fmt: str = "mp4", g
             cx, cy, cw, ch = crop_rect(c, info)
             crop = f",crop={cw}:{ch}:{cx}:{cy}"
         nfr = _frames(seg, fps)
-        filt.append(f"[{vi}:v:0]setpts=PTS-STARTPTS,fps={fps_s}{crop},"
+        # Times are now relative to the read start; shift them to the in-point. With round=up, output frame k
+        # shows the last frame that started at or before in + k/fps (the same frame the preview shows there),
+        # and start_time=0 holds the frame that was already on screen at the in-point.
+        filt.append(f"[{vi}:v:0]setpts=PTS-{look + EPS:.6f}/TB,fps={fps_s}:round=up:start_time=0,"
+                    f"tpad=stop=-1:stop_mode=clone{crop},"
                     f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
                     f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,trim=end_frame={nfr},setpts=PTS-STARTPTS[v{i}]")
         fmt_a = "aformat=sample_fmts=fltp:channel_layouts=stereo"
         exact = f"apad=whole_dur={seg:.4f},atrim=end={seg:.4f},asetpts=PTS-STARTPTS"
-        if info.has_audio:
-            fades = ""
-            if c.fade_in > 0:
-                fades += f",afade=t=in:st=0:d={min(c.fade_in, c.duration):.3f}"
-            if c.fade_out > 0:
-                fo = min(c.fade_out, c.duration)
-                fades += f",afade=t=out:st={max(0, c.duration - fo):.3f}:d={fo:.3f}"
-            filt.append(f"[{vi}:a:0]asetpts=PTS-STARTPTS,volume='{_gain_expr(c)}':eval=frame{fades},"
+        if info.has_audio and c.linked:
+            filt.append(f"[{vi}:a:0]atrim=start={look:.6f},asetpts=PTS-STARTPTS,volume='{_gain_expr(c)}':eval=frame{_fades(c)},"
                         f"aresample=48000,{fmt_a},{exact}[a{i}]")
         else:
             cmd += ["-f", "lavfi", "-t", f"{seg:.4f}", "-i", "anullsrc=r=48000:cl=stereo"]
             filt.append(f"[{n_in}:a]{fmt_a},{exact}[a{i}]")
             n_in += 1
         labels.append(f"[v{i}][a{i}]")
-    filt.append(f"{''.join(labels)}concat=n={len(p.clips)}:v=1:a=1[vc][aout]")
+    loose = []
+    total = sum(segs)
+    for j, snd in enumerate(p.sounds):             # unlinked sound, mixed in at its own place
+        at = map_time(p, snd.start)
+        if at >= total - 0.001 or snd.duration <= 0 or not probe(snd.path).has_audio:
+            continue                                # starts after the video ends: not in the saved video
+        length = min(snd.duration, total - at)
+        cmd += ["-vn", "-ss", f"{snd.src_in:.6f}", "-t", f"{length + 0.25:.6f}", "-i", snd.path]
+        filt.append(f"[{n_in}:a:0]asetpts=PTS-STARTPTS,atrim=end={length:.6f},volume='{_gain_expr(snd)}':eval=frame"
+                    f"{_fades(snd)},aresample=48000,{fmt_a},adelay={int(round(at * 1000))}:all=1[u{j}]")
+        loose.append(f"[u{j}]")
+        n_in += 1
+    if loose:
+        filt.append(f"{''.join(labels)}concat=n={len(p.clips)}:v=1:a=1[vc][ac]")
+        filt.append(f"[ac]{''.join(loose)}amix=inputs={len(loose) + 1}:duration=first:normalize=0[aout]")
+    else:
+        filt.append(f"{''.join(labels)}concat=n={len(p.clips)}:v=1:a=1[vc][aout]")
     chain, last = [], "vc"
     for j, t in enumerate(p.texts):
         if not t.text.strip():
@@ -228,12 +258,12 @@ def export(p: Project, out: str, progress: Optional[Callable[[float], None]] = N
            cancel: Optional[threading.Event] = None, use_gpu: bool = True) -> str:
     """Run the export on the GPU when it can (falling back to the CPU if it cannot). Calls progress(0..1).
     Writes to a temporary name and renames on success, so an existing file is never damaged by a failed or
-    cancelled run. Returns "gpu" or "cpu": which one did the encoding."""
+    canceled run. Returns "gpu" or "cpu": which one did the encoding."""
     ext = os.path.splitext(out)[1].lower()
     if ext not in FORMATS:
         raise ValueError("Save as .mp4, .mov or .mkv.")
     real_out = os.path.realpath(out)
-    for c in p.clips:
+    for c in p.clips + p.sounds:
         if not os.path.exists(c.path):
             raise ValueError(f"A video file is missing: {c.path}")
         if os.path.realpath(c.path) == real_out:
@@ -249,7 +279,7 @@ def export(p: Project, out: str, progress: Optional[Callable[[float], None]] = N
             try:
                 _encode(p, out, part, work, crf, FORMATS[ext], dev, progress, cancel)
                 return "gpu"
-            except ExportCancelled:
+            except ExportCanceled:
                 raise
             except RuntimeError as err:          # the GPU path failed: finish on the CPU instead of failing the export
                 _gpu_cache["last_error"] = str(err)
@@ -281,7 +311,7 @@ def _encode(p, out, part, work, crf, fmt, gpu, progress, cancel):
                 proc.kill()
                 proc.wait()
                 _running.discard(proc)
-                raise ExportCancelled()
+                raise ExportCanceled()
             if line.startswith("out_time_us=") and progress:
                 try:
                     progress(min(1.0, int(line.split("=")[1]) / 1e6 / total))
@@ -290,7 +320,7 @@ def _encode(p, out, part, work, crf, fmt, gpu, progress, cancel):
         rc = proc.wait()
         _running.discard(proc)
         if cancel is not None and cancel.is_set():
-            raise ExportCancelled()
+            raise ExportCanceled()
         if rc != 0:
             errf.seek(0)
             raise RuntimeError(errf.read().strip()[-800:] or "ffmpeg failed")

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Captions: one renderer for the preview and the export, so they always look the same.
 
-Pango does font fallback, so emoji (colour), CJK and accented text all draw. Text sits in a translucent
+Pango does font fallback, so emoji (color), CJK and accented text all draw. Text sits in a translucent
 box. A caption is one line and shrinks to fit the frame width.
 """
 import threading

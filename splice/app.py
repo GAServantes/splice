@@ -6,13 +6,15 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Graphene", "1.0")
+gi.require_version("Gst", "1.0")
 from gi.repository import Gtk, Adw, Gdk, Gio, GLib, Graphene
+from gi.repository import Gst
 
 from . import cropdrag
 from . import export as exporter
 from .lanes import Lanes, Labels, Playhead
 from .media import probe
-from .model import Project, Clip, Text
+from .model import Project, Clip, Sound, Text
 from .player import Player
 from . import textfit
 
@@ -37,7 +39,7 @@ def hex_of(rgba):
 
 
 def contain(aw, ah, bw, bh):
-    """Largest rectangle with aspect aw:ah that fits inside bw x bh, centred. Returns (x, y, w, h)."""
+    """Largest rectangle with aspect aw:ah that fits inside bw x bh, centered. Returns (x, y, w, h)."""
     if aw <= 0 or ah <= 0 or bw <= 0 or bh <= 0:
         return (0.0, 0.0, float(bw), float(bh))
     s = min(bw / aw, bh / ah)
@@ -110,7 +112,7 @@ class SpliceWindow(Adw.ApplicationWindow):
     def __init__(self, app, project=None):
         super().__init__(application=app, title="Splice", default_width=1100, default_height=760)
         self.project = project or Project()
-        self.sel = None              # ("v"|"t"|"s", index) or None
+        self.sel = None              # ("v"|"t"|"s"|"a", index) or None ("a": unlinked sound)
         self.crop_mode = False
         self.t = 0.0
         self.frame_wh = (16, 9)
@@ -123,7 +125,6 @@ class SpliceWindow(Adw.ApplicationWindow):
         self._force_close = False
         self._rev = 0
         self._okey = None
-        self._settle_id = 0
         self.crop_lock = None        # keep this pixel aspect while dragging the crop box (None = free)
         self._crop_ui = None         # the number boxes of the open crop editor
         self._cdrag = None
@@ -140,6 +141,11 @@ class SpliceWindow(Adw.ApplicationWindow):
         missing = [n for n in ("ffmpeg", "ffprobe") if not shutil.which(n)]
         if missing:
             GLib.idle_add(self._need_tools, missing)
+        elif not Gst.ElementFactory.find("h264parse"):
+            # Without the H.264 parser, the preview can land one frame off in screen recordings
+            # (variable frame rate), so it no longer shows exactly where a cut lands.
+            GLib.timeout_add(1500, self.toast_once, "For exact frames in the preview, install "
+                             "gstreamer1.0-plugins-bad:  sudo apt install gstreamer1.0-plugins-bad")
 
     def _need_tools(self, missing):
         d = Adw.AlertDialog(heading="ffmpeg is not installed",
@@ -228,6 +234,8 @@ class SpliceWindow(Adw.ApplicationWindow):
         tools.append(tool_button("insert-text-symbolic", "Add text", "Add a caption at the playhead", self.tool_text))
         tools.append(tool_button("splice-crop-symbolic", "Crop", "Crop the clip under the playhead", self.tool_crop))
         tools.append(tool_button("audio-volume-high-symbolic", "Volume", "Edit the sound of the clip under the playhead", self.tool_volume))
+        tools.append(tool_button("splice-unlink-symbolic", "Unlink", "Unlink the sound of the clip under the playhead from "
+                                 "its picture, to move or trim it on its own. Again: link it back (U)", self.tool_unlink))
         zr = Gtk.Box(spacing=4, hexpand=False)
         for ic, f in (("zoom-out-symbolic", 1 / 1.4), ("zoom-in-symbolic", 1.4)):
             b = Gtk.Button(icon_name=ic, tooltip_text="Zoom the timeline (Alt+scroll)", focus_on_click=False)
@@ -275,7 +283,8 @@ class SpliceWindow(Adw.ApplicationWindow):
 
     # --------------------------------------------------------------- state
     def _dump(self):
-        return json.dumps({"clips": [vars(c) for c in self.project.clips], "texts": [vars(t) for t in self.project.texts]})
+        return json.dumps({"clips": [vars(c) for c in self.project.clips], "texts": [vars(t) for t in self.project.texts],
+                           "sounds": [vars(s) for s in self.project.sounds]})
 
     def _push(self, snap):
         self.undo.append(snap)
@@ -298,6 +307,7 @@ class SpliceWindow(Adw.ApplicationWindow):
         d = json.loads(s)
         self.project.clips[:] = [Clip(**c) for c in d["clips"]]
         self.project.texts[:] = [Text(**t) for t in d["texts"]]
+        self.project.sounds[:] = [Sound(**s) for s in d.get("sounds", [])]
         self.sel = None
         self.crop_mode = False
         self._cp_key = None
@@ -327,8 +337,7 @@ class SpliceWindow(Adw.ApplicationWindow):
         self._rev += 1
         if self.sel:
             k, i = self.sel
-            n = len(self.project.texts) if k == "t" else len(self.project.clips)
-            if i >= n:
+            if i >= self._count(k):
                 self.sel = None
                 self.crop_mode = False
         if self.crop_mode:
@@ -346,6 +355,10 @@ class SpliceWindow(Adw.ApplicationWindow):
         self._sync_undo()
         self._update_title()
 
+    def _count(self, kind):
+        p = self.project
+        return len(p.texts) if kind == "t" else len(p.sounds) if kind == "a" else len(p.clips)
+
     def select(self, sel):
         if sel != self.sel:
             self.sel = sel
@@ -358,17 +371,8 @@ class SpliceWindow(Adw.ApplicationWindow):
         self.player.seek(max(0.0, min(t, self.project.duration)))
 
     def seek_scrub(self, t):
-        """Seek while the user is dragging: quick keyframe jumps, then one exact seek once they pause."""
-        t = max(0.0, min(t, self.project.duration))
-        self.player.seek(t, fast=True)
-        if self._settle_id:
-            GLib.source_remove(self._settle_id)
-        self._settle_id = GLib.timeout_add(200, self._settle, t)
-
-    def _settle(self, t):
-        self._settle_id = 0
-        self.player.seek(t)
-        return False
+        """Seek while the user is dragging: exact frames; while one decodes, only the newest position waits."""
+        self.player.seek(max(0.0, min(t, self.project.duration)), scrub=True)
 
     def jump(self, d):
         p = self.project
@@ -485,6 +489,15 @@ class SpliceWindow(Adw.ApplicationWindow):
     # ------------------------------------------------------------- tools
     def tool_split(self):
         snap = self._dump()
+        if self.sel and self.sel[0] == "a":            # an unlinked sound is selected: split that
+            j = self.sel[1]
+            if self.project.split_sound(j, self.t):
+                self._push(snap)
+                self.sel = ("a", j + 1)
+                self.changed()
+            else:
+                self.toast("Move the playhead into the sound, away from its edges, to split it.")
+            return
         i, _ = self.project.clip_at(self.t)           # the clip being split (before the split)
         if self.project.split(self.t):
             self._push(snap)
@@ -524,6 +537,51 @@ class SpliceWindow(Adw.ApplicationWindow):
         i, _ = self.project.clip_at(self.t)
         self.select(("s", i))
 
+    def _unlink_target(self):
+        """The clip the Unlink tool acts on: the selected clip (or its sound), else the one under the playhead."""
+        p = self.project
+        if self.sel and self.sel[0] in ("v", "s"):
+            return self.sel[1]
+        if self.sel and self.sel[0] == "a":
+            snd = p.sounds[self.sel[1]]
+            for i, c in enumerate(p.clips):
+                if not c.linked and self.sel[1] in p.unlinked_from(i) and c.path == snd.path:
+                    return i
+            return None
+        return p.clip_at(self.t)[0] if p.clips else None
+
+    def tool_unlink(self):
+        if not self.project.clips:
+            return self.toast("Add a video first.")
+        i = self._unlink_target()
+        if i is None:
+            return self.toast("This sound's clip is gone, so it can't be linked back. Delete it if you don't need it.")
+        c = self.project.clips[i]
+        if c.linked:
+            self.unlink_clip(i)
+        else:
+            self.relink_clip(i)
+
+    def unlink_clip(self, i):
+        c = self.project.clips[i]
+        info = safe_info(c.path)
+        if info and not info.has_audio:
+            return self.toast("This clip has no sound to unlink.")
+        self.checkpoint()
+        j = self.project.unlink(i)
+        self.sel = ("a", j)
+        self.crop_mode = False
+        self.changed()
+        self.toast("Sound unlinked. Drag it in the Sound row to move it, or its edges to trim it.")
+
+    def relink_clip(self, i):
+        self.checkpoint()
+        self.project.relink(i)
+        self.sel = ("s", i)
+        self.crop_mode = False
+        self.changed()
+        self.toast("Sound linked to its picture again.")
+
     def delete_selected(self):
         if not self.sel:
             return
@@ -538,6 +596,9 @@ class SpliceWindow(Adw.ApplicationWindow):
         elif k == "s":
             c = self.project.clips[i]
             c.env, c.volume, c.fade_in, c.fade_out = [], 1.0, 0.0, 0.0
+        elif k == "a":
+            self.project.sounds.pop(i)
+            self.sel = None
         self.changed()
 
     # ---------------------------------------------------------- pop editor
@@ -547,7 +608,7 @@ class SpliceWindow(Adw.ApplicationWindow):
             self.pop.remove(ch)
         p, sel = self.project, self.sel
         add = self.pop.append
-        if sel and sel[1] >= (len(p.texts) if sel[0] == "t" else len(p.clips)):
+        if sel and sel[1] >= self._count(sel[0]):
             sel = self.sel = None                      # selection no longer exists
         if not sel:
             add(label("Click a clip, a text block or the sound row to edit it. Drag the edges of a clip to trim it.", dim=True))
@@ -593,6 +654,8 @@ class SpliceWindow(Adw.ApplicationWindow):
             cr_b = Gtk.Button(label="Crop…")
             cr_b.connect("clicked", lambda *_: self.tool_crop())
             add(cr_b)
+            if not info or info.has_audio:
+                add(self._link_button(i))
             self._delete_button(add, "Delete clip")
         elif k == "t":
             t = p.texts[i]
@@ -623,9 +686,22 @@ class SpliceWindow(Adw.ApplicationWindow):
             col.connect("notify::rgba", lambda w, _p: (self.checkpoint(("col", i)), setattr(t, "color", hex_of(w.get_rgba())), self.changed(False, False)))
             add(col)
             self._delete_button(add, "Delete text")
-        elif k == "s":
+        elif k == "s" and not p.clips[i].linked:
             c = p.clips[i]
             add(label(f"Sound of {c.name}", bold=True))
+            add(label("Unlinked: it is its own block in the Sound row, and this clip's picture plays silent.", dim=True))
+            add(self._link_button(i))
+        elif k in ("s", "a"):
+            c = p.clips[i] if k == "s" else p.sounds[i]
+            key = i if k == "s" else ("a", i)
+            add(label(f"Sound of {c.name}" if k == "s" else f"Unlinked sound of {c.name}", bold=True))
+            if k == "a":
+                add(label("Starts at", dim=True))
+                st = spin(0, max(p.duration, c.start) + 600, 0.1, c.start)
+                st.set_tooltip_text("Where the sound starts on the timeline. You can also drag it in the Sound row.")
+                st.connect("value-changed", lambda w: (self.checkpoint(("as", i)), p.move_sound(i, w.get_value()),
+                                                        self.changed(pop=False)))
+                add(st)
             add(label("Volume", dim=True))
             cur = c.line_at(0) if not c.env else max(g for _, g in c.env)
             vs = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 200, 1)
@@ -635,7 +711,7 @@ class SpliceWindow(Adw.ApplicationWindow):
             vs.set_value_pos(Gtk.PositionType.RIGHT)
             vs.set_format_value_func(lambda sc, v: f"{int(v)}%")
             vs.set_tooltip_text("Drag the line in the Sound row to shape the volume. Right-click a dot to remove it.")
-            vs.connect("value-changed", lambda w: self._set_volume(c, w.get_value() / 100, i))
+            vs.connect("value-changed", lambda w: self._set_volume(c, w.get_value() / 100, key))
             add(vs)
             add(label("Fade in", dim=True))
             f1 = spin(0, 30, 0.5, c.fade_in, 1, 4)
@@ -643,9 +719,30 @@ class SpliceWindow(Adw.ApplicationWindow):
             add(label("Fade out", dim=True))
             f2 = spin(0, 30, 0.5, c.fade_out, 1, 4)
             add(f2)
-            f1.connect("value-changed", lambda w: (self.checkpoint(("fi", i)), setattr(c, "fade_in", w.get_value()), self.changed(False, False)))
-            f2.connect("value-changed", lambda w: (self.checkpoint(("fo", i)), setattr(c, "fade_out", w.get_value()), self.changed(False, False)))
-            self._delete_button(add, "Reset sound")
+            f1.connect("value-changed", lambda w: (self.checkpoint(("fi", key)), setattr(c, "fade_in", w.get_value()), self.changed(False, False)))
+            f2.connect("value-changed", lambda w: (self.checkpoint(("fo", key)), setattr(c, "fade_out", w.get_value()), self.changed(False, False)))
+            if k == "s":
+                add(self._link_button(i))
+                self._delete_button(add, "Reset sound")
+            else:
+                owner = self._unlink_target()
+                if owner is not None:
+                    b = Gtk.Button(label="Link again", tooltip_text="Put this sound back under its picture, in sync (U)")
+                    b.connect("clicked", lambda *_: self.relink_clip(owner))
+                    add(b)
+                self._delete_button(add, "Delete sound")
+
+    def _link_button(self, i):
+        c = self.project.clips[i]
+        if c.linked:
+            b = Gtk.Button(label="Unlink sound", tooltip_text="Separate the sound from the picture, to move, trim or "
+                                                             "delete it on its own (U)")
+            b.connect("clicked", lambda *_: self.unlink_clip(i))
+        else:
+            b = Gtk.Button(label="Link sound again", tooltip_text="Put the clip's own sound back under its picture, "
+                                                                 "in sync, and remove its unlinked sound (U)")
+            b.connect("clicked", lambda *_: self.relink_clip(i))
+        return b
 
     def _delete_button(self, add, text):
         b = Gtk.Button(label=text, css_classes=["destructive-action"], hexpand=True, halign=Gtk.Align.END)
@@ -862,6 +959,7 @@ class SpliceWindow(Adw.ApplicationWindow):
         self.checkpoint()
         self.project.clips[:] = newp.clips
         self.project.texts[:] = newp.texts
+        self.project.sounds[:] = newp.sounds
         self.path = path
         self.sel = None
         self.crop_mode = False
@@ -907,9 +1005,13 @@ class SpliceWindow(Adw.ApplicationWindow):
             return
         name = self.project.clips[0].name + "-edited.mp4"
         dlg = Gtk.FileDialog(title="Save video", initial_name=name)
-        vids = os.path.expanduser("~/Videos")
-        if os.path.isdir(vids):
-            dlg.set_initial_folder(Gio.File.new_for_path(vids))
+        # Save next to the first clip (so a recording edited from SnapCap's
+        # preview lands beside the original); ~/Videos if that isn't writable.
+        folder = os.path.dirname(self.project.clips[0].path)
+        if not os.access(folder, os.W_OK | os.X_OK):
+            folder = os.path.expanduser("~/Videos")
+        if os.path.isdir(folder):
+            dlg.set_initial_folder(Gio.File.new_for_path(folder))
         dlg.save(self, None, lambda d, r: self._export_to(d, r))
 
     def _export_to(self, dlg, res):
@@ -929,14 +1031,12 @@ class SpliceWindow(Adw.ApplicationWindow):
         msg = Gtk.Label(label=f"Saving {os.path.basename(out)}…", xalign=0)
         bar = Gtk.ProgressBar(show_text=True)
         cancel_b = Gtk.Button(label="Cancel", halign=Gtk.Align.END)
-        cancel_b.connect("clicked", lambda *_: (self._cancel.set(), cancel_b.set_sensitive(False), msg.set_label("Cancelling…")))
+        cancel_b.connect("clicked", lambda *_: (self._cancel.set(), cancel_b.set_sensitive(False), msg.set_label("Canceling…")))
         for w in (msg, bar, cancel_b):
             box.append(w)
         win.set_content(box)
         win.present()
-        snap = Project.__new__(Project)
-        snap.clips = copy.deepcopy(self.project.clips)
-        snap.texts = copy.deepcopy(self.project.texts)
+        snap = copy.deepcopy(self.project)            # the edit can go on while this saves
         cancel = self._cancel
 
         def prog(f):
@@ -951,8 +1051,8 @@ class SpliceWindow(Adw.ApplicationWindow):
                 used = exporter.export(snap, out, prog, cancel=cancel)
                 if dev and used == "cpu":
                     used = "cpu-fallback"
-            except exporter.ExportCancelled:
-                err = "cancelled"
+            except exporter.ExportCanceled:
+                err = "canceled"
             except Exception as e:      # shown to the user below
                 err = str(e) or type(e).__name__
             GLib.idle_add(done, err, used)
@@ -960,8 +1060,8 @@ class SpliceWindow(Adw.ApplicationWindow):
         def done(err, used=None):
             win.close()
             self._busy = False
-            if err == "cancelled":
-                self.toast("Saving cancelled.")
+            if err == "canceled":
+                self.toast("Saving canceled.")
             elif err:
                 dlg2 = Adw.AlertDialog(heading="Could not save the video", body=err[:600])
                 dlg2.add_response("ok", "OK")
@@ -1001,6 +1101,9 @@ class SpliceWindow(Adw.ApplicationWindow):
             return True
         if keyval in (Gdk.KEY_s, Gdk.KEY_S):
             self.tool_split()
+            return True
+        if keyval in (Gdk.KEY_u, Gdk.KEY_U):
+            self.tool_unlink()
             return True
         if keyval in (Gdk.KEY_Delete, Gdk.KEY_BackSpace):
             self.delete_selected()
@@ -1071,6 +1174,7 @@ class SpliceApp(Adw.Application):
                 p = Project.load(projects[0])
                 win.project.clips[:] = p.clips
                 win.project.texts[:] = p.texts
+                win.project.sounds[:] = p.sounds
                 win.path = os.path.abspath(projects[0])
             except Exception as e:
                 print("Could not open project:", e, file=sys.stderr)
